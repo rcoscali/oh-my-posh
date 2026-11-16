@@ -45,9 +45,7 @@ Use the SHA256 fingerprint shown by `ssh-add -l` as the map key. Its value is av
 
 :::note default template
 
-```template
-{{ if .Running }} {{ "\uf43d" }} {{ .Count }} {{ end }}
-```
+<Config data={{ template: "{{ if .Running }} \uf43d {{ .Count }} {{ end }}" }} />
 
 :::
 
