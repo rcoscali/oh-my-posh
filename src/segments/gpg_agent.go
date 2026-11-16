@@ -2,6 +2,7 @@ package segments
 
 import (
 	"errors"
+	"iter"
 	"strconv"
 	"strings"
 
@@ -12,17 +13,22 @@ import (
 )
 
 const (
+	GPGAgentFetchKeys    options.Option = "fetch_keys"
 	GPGAgentKeySeparator options.Option = "key_separator"
 	GPGAgentKeyTemplate  options.Option = "key_template"
 	GPGAgentMappedKeys   options.Option = "mapped_keys"
 
-	gpgAgentCacheDuration = "10s"
-	gpgAgentKeyInfoKey    = "gpgagent_keyinfo"
-	gpgAgentGitKeyPrefix  = "gpgagent_git_"
-	gpgAgentSSHSocket     = "S.gpg-agent.ssh"
+	gpgAgentCacheDuration  = "10s"
+	gpgAgentKeyInfoKey     = "gpgagent_keyinfo"
+	gpgAgentRunningKey     = "gpgagent_running"
+	gpgAgentGitKeyPrefix   = "gpgagent_git_"
+	gpgAgentSSHSocket      = "S.gpg-agent.ssh"
+	gpgAgentKeyInfoCommand = "keyinfo --list"
+	gpgAgentInfoCommand    = "GETINFO pid"
 
-	// Fields of a "S KEYINFO" status line, see the gpg-agent documentation.
-	keyInfoFields       = 11
+	// Fields of a "S KEYINFO" status line, see the gpg-agent documentation. gpg-agent appended the cached,
+	// protection, fingerprint, ttl and flags fields over successive releases, so only the first four are certain.
+	keyInfoFields       = 6
 	keyInfoKeygrip      = 2
 	keyInfoCached       = 6
 	keyInfoTTL          = 9
@@ -52,7 +58,7 @@ type GPGKey struct {
 }
 
 func (g *GPGAgent) Template() string {
-	return "{{ if .Running }}  {{ .CachedCount }} {{ end }}"
+	return "{{ if .Running }}  {{ if .Count }}{{ .CachedCount }} {{ end }}{{ end }}"
 }
 
 func (g *GPGAgent) Enabled() bool {
@@ -60,12 +66,19 @@ func (g *GPGAgent) Enabled() bool {
 	g.SSHSupport = strings.HasSuffix(g.env.Getenv("SSH_AUTH_SOCK"), gpgAgentSSHSocket)
 	g.readGitSigning()
 
-	keys, running := parseKeyInfo(g.keyInfo())
-	g.Running = running
-	if !running {
+	if !g.options.Bool(GPGAgentFetchKeys, false) {
+		g.Running = agentAnswered(g.query(gpgAgentRunningKey, gpgAgentInfoCommand))
 		return true
 	}
 
+	output := g.query(gpgAgentKeyInfoKey, gpgAgentKeyInfoCommand)
+
+	g.Running = agentAnswered(output)
+	if !g.Running {
+		return true
+	}
+
+	keys := parseKeyInfo(output)
 	g.Count = len(keys)
 	for _, key := range keys {
 		if key.Cached {
@@ -82,24 +95,24 @@ func (g *GPGAgent) cacheDuration() cache.Duration {
 	return cache.Duration(g.options.String(options.CacheDuration, gpgAgentCacheDuration))
 }
 
-func (g *GPGAgent) keyInfo() string {
-	if output, found := cache.Device.Get[string](gpgAgentKeyInfoKey); found {
+func (g *GPGAgent) query(key, command string) string {
+	if output, found := cache.Device.Get[string](key); found {
 		return output
 	}
 
-	output := g.queryAgent()
-	cache.Device.Set(gpgAgentKeyInfoKey, output, g.cacheDuration())
+	output := g.queryAgent(command)
+	cache.Device.Set(key, output, g.cacheDuration())
 
 	return output
 }
 
-func (g *GPGAgent) queryAgent() string {
+func (g *GPGAgent) queryAgent(command string) string {
 	if !g.env.HasCommand("gpg-connect-agent") {
 		return ""
 	}
 
 	// --no-autostart keeps the query from launching the agent it is meant to report on.
-	output, err := g.env.RunCommand("gpg-connect-agent", "--no-autostart", "keyinfo --list", "/bye")
+	output, err := g.env.RunCommand("gpg-connect-agent", "--no-autostart", command, "/bye")
 	if err != nil {
 		log.Error(err)
 		return ""
@@ -117,7 +130,7 @@ func (g *GPGAgent) readGitSigning() {
 		cache.Session.Set(key, output, g.cacheDuration())
 	}
 
-	for line := range strings.SplitSeq(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+	for line := range gpgAgentLines(output) {
 		name, value, _ := strings.Cut(strings.TrimSpace(line), " ")
 
 		switch name {
@@ -181,30 +194,43 @@ func (g *GPGAgent) renderKeys(keys []*GPGKey) template.Markup {
 	return template.JoinMarkup(parts...)
 }
 
-// parseKeyInfo reads the output of `gpg-connect-agent "keyinfo --list" /bye`. gpg-connect-agent exits 0
-// without an agent and only reports it on stderr, so a closing "OK" status is what proves the agent answered.
-func parseKeyInfo(output string) ([]*GPGKey, bool) {
-	var keys []*GPGKey
-	running := false
+func gpgAgentLines(output string) iter.Seq[string] {
+	return strings.SplitSeq(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+}
 
-	for line := range strings.SplitSeq(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 1 && fields[0] == gpgAgentStatusOK {
-			running = true
-			continue
+// agentAnswered reports whether a gpg-agent replied. gpg-connect-agent exits 0 without an agent and only
+// mentions it on stderr, so a closing "OK" status is what proves the agent answered.
+func agentAnswered(output string) bool {
+	for line := range gpgAgentLines(output) {
+		if strings.TrimSpace(line) == gpgAgentStatusOK {
+			return true
 		}
+	}
 
+	return false
+}
+
+func parseKeyInfo(output string) []*GPGKey {
+	var keys []*GPGKey
+
+	for line := range gpgAgentLines(output) {
+		fields := strings.Fields(line)
 		if len(fields) < keyInfoFields || fields[0] != gpgAgentStatusKey || fields[1] != gpgAgentStatusEvent {
 			continue
 		}
 
-		ttl, _ := strconv.Atoi(fields[keyInfoTTL])
-		keys = append(keys, &GPGKey{
-			Keygrip: fields[keyInfoKeygrip],
-			Cached:  fields[keyInfoCached] == "1",
-			TTL:     ttl,
-		})
+		key := &GPGKey{Keygrip: fields[keyInfoKeygrip]}
+
+		if len(fields) > keyInfoCached {
+			key.Cached = fields[keyInfoCached] == "1"
+		}
+
+		if len(fields) > keyInfoTTL {
+			key.TTL, _ = strconv.Atoi(fields[keyInfoTTL])
+		}
+
+		keys = append(keys, key)
 	}
 
-	return keys, running
+	return keys
 }

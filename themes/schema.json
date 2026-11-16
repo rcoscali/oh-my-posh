@@ -2331,6 +2331,12 @@
                     "$ref": "#/definitions/cache_duration",
                     "default": "10s"
                   },
+                  "fetch_keys": {
+                    "type": "boolean",
+                    "title": "Fetch Keys",
+                    "description": "Query the agent for its keys to populate .Count, .CachedCount, .Keys and .TTL. Every query reads the passphrase cache, which resets the idle timer of cached passphrases and keeps unlocked keys unlocked for longer than default-cache-ttl.",
+                    "default": false
+                  },
                   "key_separator": {
                     "type": "string",
                     "title": "Key Separator",

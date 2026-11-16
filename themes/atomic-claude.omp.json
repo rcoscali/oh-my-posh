@@ -330,7 +330,7 @@
                         }
                     },
                     "type": "gpgagent",
-                    "template": "{{ if .Running }} 󺀁 {{ .CachedCount }}/{{ .Count }}{{ if .Keys }} {{ .Keys }}{{ end }}{{ if and .SignCommits (eq .CachedCount 0) }} {{ end }} {{ end }}",
+                    "template": "{{ if .Running }} 󺀁 {{ if .Count }}{{ .CachedCount }}/{{ .Count }}{{ if .Keys }} {{ .Keys }}{{ end }}{{ if and .SignCommits (eq .CachedCount 0) }} {{ end }}{{ end }} {{ end }}",
                     "trailing_diamond": ""
                 }
             ],
