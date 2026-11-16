@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jandedobbeleer/oh-my-posh/src/cache"
+	"github.com/jandedobbeleer/oh-my-posh/src/log"
 	"github.com/jandedobbeleer/oh-my-posh/src/runtime/mock"
 	"github.com/jandedobbeleer/oh-my-posh/src/segments/options"
 	"github.com/jandedobbeleer/oh-my-posh/src/template"
@@ -339,4 +340,58 @@ func TestGPGAgentCachesTheRunningState(t *testing.T) {
 	}
 
 	env.AssertNumberOfCalls(t, "RunCommand", 2)
+}
+
+func TestGPGAgentLogsUnexpectedGitFailures(t *testing.T) {
+	cases := []struct {
+		GitError       error
+		Case           string
+		ExpectedLogged bool
+	}{
+		{Case: "no signing configuration is expected", GitError: exitCodeError(1)},
+		{Case: "an unsafe repository is not", GitError: exitCodeError(128), ExpectedLogged: true},
+		{Case: "an invalid config file is not", GitError: exitCodeError(3), ExpectedLogged: true},
+		{Case: "a failure without an exit code is not", GitError: errors.New("git exploded"), ExpectedLogged: true},
+	}
+
+	// log.Enable has no counterpart, so logging stays on for the rest of the package and the shared
+	// buffer is read from the offset each case starts at.
+	log.Enable(true)
+
+	for _, tc := range cases {
+		t.Run(tc.Case, func(t *testing.T) {
+			cache.Device.DeleteAll()
+			cache.Session.DeleteAll()
+			t.Cleanup(func() {
+				cache.Device.DeleteAll()
+				cache.Session.DeleteAll()
+			})
+
+			env := new(mock.Environment)
+			env.On("Getenv", "GPG_TTY").Return("")
+			env.On("Getenv", "SSH_AUTH_SOCK").Return("")
+			env.On("Pwd").Return("/home/user/project")
+			env.On("Shell").Return("bash")
+			env.On("HasCommand", "gpg-connect-agent").Return(true)
+			env.On("HasCommand", "git").Return(true)
+			env.On("RunCommand", "gpg-connect-agent", gpgInfoArgs).Return(gpgAgentInfo, nil)
+			env.On("RunCommand", "git", []string{"config", "--get-regexp", `^(user\.signingkey|commit\.gpgsign)$`}).
+				Return("", tc.GitError)
+
+			origCache := template.Cache
+			t.Cleanup(func() { template.Cache = origCache })
+			template.Cache = &cache.Template{}
+			template.Init(env, nil, nil)
+
+			offset := len(log.String())
+
+			agent := &GPGAgent{}
+			agent.Init(options.Map{}, env)
+
+			assert.True(t, agent.Enabled())
+			assert.Empty(t, agent.SigningKey)
+			assert.False(t, agent.SignCommits)
+			assert.Equal(t, tc.ExpectedLogged, strings.Contains(log.String()[offset:], tc.GitError.Error()))
+		})
+	}
 }

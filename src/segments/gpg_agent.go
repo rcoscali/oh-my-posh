@@ -35,6 +35,9 @@ const (
 	gpgAgentStatusOK    = "OK"
 	gpgAgentStatusKey   = "S"
 	gpgAgentStatusEvent = "KEYINFO"
+
+	// git config exits 1 when nothing matches the pattern; every other code is a real failure.
+	gitConfigNoMatch = 1
 )
 
 type GPGAgent struct {
@@ -147,11 +150,10 @@ func (g *GPGAgent) queryGitConfig() string {
 		return ""
 	}
 
-	// git exits 1 when neither key is set, which is a valid answer rather than a failure.
 	output, err := g.env.RunCommand("git", "config", "--get-regexp", `^(user\.signingkey|commit\.gpgsign)$`)
 	if err != nil {
 		var exitErr interface{ ExitCode() int }
-		if !errors.As(err, &exitErr) {
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != gitConfigNoMatch {
 			log.Error(err)
 		}
 
